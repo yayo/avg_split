@@ -1,0 +1,33 @@
+#!/bin/sh
+
+# By: "Robert Young" <yayooo@gmail.com>
+# file2mails FILE $((25*1024*1024)) 'TEST <alert@yayooo.com>' yayooo@gmail.com,trash@yayooo.com $(date +.%Y%m%d%H%M%S) 'YOUR_MESSAGE' application/octet-stream
+
+fake_hostname() {
+FAKE_HOSTNAME=''
+while [ 12 -ne $(echo -n ${FAKE_HOSTNAME}|wc -c) ] ; do FAKE_HOSTNAME=$(openssl rand -base64 9|tr -d '/+') ; done
+FAKE_HOSTNAME=@$(echo ${FAKE_HOSTNAME}|tr A-Z a-z).net
+}
+fstat() { echo -n ${2} ${1} ${3}T${4}${5} ;}
+info() { echo $(basename ${1})"${2}" $(fstat $(sha512sum < ${1} | sed -e 's/^\([0-9a-f]\{128\}\)  -/\1/') $(stat --printf='%s %y' ${1}) ) ;}
+send() {
+fake_hostname
+if [ ! -z "${7}" ]
+then
+MIME=${7}
+else
+MIME=application/octet-stream
+fi
+TEMP=$(/bin/mktemp -d)
+(date +%Y%m%dT%H:%M:%S.%N%z ; echo "${6}" ; info ${1} "${5}" ) > ${TEMP}/info
+/usr/bin/asplit ${1} ${2} "${5}." ${TEMP}
+for PIECE in ${TEMP}/$(basename ${1})${5}.*
+do
+BASENAME=$(basename ${PIECE})
+(cat ${TEMP}/info ; info ${PIECE} '') | /usr/bin/mail --norc --no-config --debug-level=0 --content-type=${MIME} -a 'Message-ID: <'$(date +%s%N)${FAKE_HOSTNAME}'>' -a "From: ${3}" --content-filename="${BASENAME}" -A "${PIECE}" -s "${BASENAME}" ${4}
+done
+rm -rf ${TEMP}/
+}
+
+send ${1} ${2} "${3}" ${4} "${5}" "${6}" ${7}
+

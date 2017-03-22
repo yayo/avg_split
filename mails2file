@@ -1,0 +1,467 @@
+#!/usr/bin/perl
+
+# By: "Robert Young" <yayooo@gmail.com> 
+# perl mails2file get imap.gmail.com:993 trash@yayooo.com PASSWORD '[Gmail]/Trash' Client_1 /tmp tor.7z 'SINCE '$(date -d -1day +%d-%b-%Y)' FROM alert@yayooo.com FROM "distribute_tor" TO trash@yayooo.com TO yayooo@gmail.com SUBJECT tor.7z. TEXT tor.7z. TEXT valid-after TEXT fresh-until TEXT valid-until TEXT 20170123T12:34:'
+# HEADER Message-ID 1491851380454938661@ckh4dx1zt7el.net
+# perl mails2file check imap.139.com:993 YOUR_CELLPHONE@139.com PASSWORD '&XfJSIJZk-'
+# perl mails2file check imap.exmail.qq.com:993 trash@yayooo.com PASSWORD 'Deleted Messages'
+# perl mails2file clear ... Client_1 /tmp ... # clear downloaded_flag (prepare for latter download)
+# clear (without mail_list) # list mails marked downloaded
+# perl mails2file set ... Client_1 /tmp ... # set downloaded_flag (skip download this mails afterwards)
+# set (without mail_list) # list mails ready to download
+
+use strict;
+use warnings;
+
+use Mail::IMAPClient;
+use Cwd;
+use MIME::Base64;
+use Digest::SHA;
+use DateTime;
+use Time::HiRes;
+use POSIX;
+use Sys::Mmap;
+
+sub success
+ {if(defined($_[1]))
+   {if(1!=munmap($_[0])){;}
+    else{close($_[1]);}
+   }
+  if(defined($_[2])){if(1!=munmap($_[2])){die();}}
+  if(defined($_[3])){close($_[3]);}
+  print($_[4]."\t".$_[5]."\t".$_[6]."\n");
+  $_[7]->store(join(',',keys(%{$_[8]})),'+FLAGS '.$_[9]);
+ }
+
+sub rename_success
+ {if(!rename($_[4].'.tmp',$_[4])){die('RENAME_FAILED: '.$_[4]);}
+  else
+   {if(1!=Time::HiRes::utime($_[10],$_[10],$_[4])) {utime($_[10],$_[10],$_[4]);};
+    success($_[0],$_[1],$_[2],$_[3],$_[4],$_[5],$_[6],$_[7],$_[8],$_[9]);
+   }
+ }
+
+sub verify_hash
+ {if(Digest::SHA::sha512_hex(${$_[0]}) ne $_[1]){return(0);}
+  else{return($_[2]);}
+ }
+
+sub verify_size_hash
+ {if(length(${$_[0]})!=$_[2]){return(0);}
+  else
+   {return(verify_hash($_[0],$_[1],$_[2]));
+   }
+ }
+
+sub advance
+ {${$_[2]}+=$_[1];
+  if(1!=munmap(${$_[0]})){die();};
+  undef(${$_[0]});
+ }
+
+sub hash_advance
+ {$_[3]->add(${$_[4]});
+  advance($_[0],$_[1],$_[2]);
+ }
+
+sub fill_advance
+ {substr(${$_[0]},0,$_[1])=${$_[4]};
+  hash_advance($_[0],$_[1],$_[2],$_[3],$_[4]);
+ }
+
+sub rfc822_rfc8601
+ {my %month=('Jan'=>1,'Feb'=>2,'Mar'=>3,'Apr'=>4,'May'=>5,'Jun'=>6,'Jul'=>7,'Aug'=>8,'Sep'=>9,'Oct'=>10,'Nov'=>11,'Dec'=>12);
+  if($_[0] !~ /^([A-Z][a-z]{2}), ([0]{0,1})([0-9]{1,2}) ([A-Z][a-z]{2}) ([0-9]{4}) ([0-9]{2}):([0-9]{2}):([0-9]{2}) (([+-])([0-9]{2})([0-9]{2}))( \([A-Z]{3}\)){0,1}$/){die();}
+  else
+   {if(!exists($month{$4})){die();}
+    else
+     {my $t=DateTime->new(year=>$5,month=>$month{$4},day=>$3,hour=>$6,minute=>$7,second=>$8,time_zone=>$9);
+      $t=$t->epoch;
+      if(POSIX::strftime('%a, '.$2.'%-e %b %Y %H:%M:%S ',gmtime($t+(($10.'60')*((60*$11)+$12)))).$9.(defined($13)?$13:'') ne $_[0]){die();}
+      else
+       {return(POSIX::strftime('%Y-%m-%dT%H:%M:%S',gmtime($t+(($10.'60')*((60*$11)+$12)))).$9);
+       }
+     }
+   }
+ }
+
+sub size_array
+ {#my ($whole_size,$piece_size,$piece_number)=@_;
+  if($_[0]<$_[1]){die();}
+  else
+   {if($_[1]==$_[0]) # ONE piece
+     {if(1!=$_[2]){die();}
+      else{return([[$_[1],'','']]);}
+     }
+    else
+     {my $t=$_[0]-$_[1];
+      if($t==$_[1]){die();} # TWO pieces
+      if($t+1==$_[1]||$t+2==$_[1])
+       {if(1!=$_[2]){die();}
+        else
+         {return([[$_[1],'',''],[$t,'','']]);
+         }
+       }
+      elsif($t==$_[1]+1||$t==$_[1]+2)
+       {if(2!=$_[2]){die();}
+        else
+         {return([[$t,'',''],[$_[1],'','']]);
+         }
+       }
+      else
+       {my @e=();
+        my $n=$_[1]+$_[2]+1;
+        if($_[2]>=2){$n=(2*($_[0]-$_[1])/($_[2]-1)+2-$_[2])/2;}
+        if($n>$_[1]+$_[2]) # This is a middle piece
+         {$n=$_[1]+1-$_[2]-1/2;
+          $n=POSIX::ceil(sqrt($n*$n+2*$_[0])-$n);
+          for($t=$_[1]+1-$_[2];$t<=($_[1]+$n-$_[2]-1);$t++){push(@e,[$t,'','']);}
+          push(@e,[($_[0]-(2*($_[1]-$_[2])+$n)*($n-1)/2),'','']);
+         }
+        else # This is the last piece
+         {for($t=$n;$t<=$n+$_[2]-2;$t++){push(@e,[$t,'','']);}
+          push(@e,[$_[1],'','']);
+         }
+        return(\@e);
+       }
+     }
+   }
+ }
+
+sub checked
+ {foreach(@{$_[0]})
+   {print(${$_}[0]."\t".(('' eq ${$_}[1])?'':${$_}[1]."\t".${${$_[1]}{${$_}[1]}}[0]."\t".${${$_[1]}{${$_}[1]}}[1]."\t".${${$_[1]}{${$_}[1]}}[2]."\t".${$_}[2])."\n");
+   }
+ }
+
+my $imap=Mail::IMAPClient->new(Server=>$ARGV[1],Ssl=>((':143' eq substr($ARGV[1],-4,4))?0:1),Uid=>1,Clear=>1,User=>$ARGV[2],Password=>$ARGV[3]);
+if(!defined($imap)){die('IMAP_LOGIN_FAILED: '.$@);}
+else
+ {$ARGV[8] =~ s/^\s+|\s+$//g;
+  if(!$imap->select($ARGV[4])){die('SELECT_FAILED:'.$ARGV[4]);}
+  else
+   {my $client=defined($ARGV[5])?$ARGV[5]:'\Seen';
+    my $t=($ARGV[0] =~ /^clear[0-9]{0,1}$/)?'-':'+';
+    my %c;
+    my $p=(9>$#ARGV?'':'0');
+    if('0' eq $p)
+     {foreach(@ARGV[9..$#ARGV])
+       {$c{$_}=0;
+        if($_ !~ /^[0-9]{1,}$/){$p=$_;}
+       }
+     }
+    my %m;
+    if('0' eq $p)
+     {%m=map {$_=>$imap->parse_headers($_,'Subject','Date','Message-ID')} keys(%c);
+     }
+    else
+     {@_=$imap->search($ARGV[8].' '.(('-' eq $t)?'':'UN').'KEYWORD '.$client) ;
+      if('' ne $imap->LastError)
+       {die('IMAP_SEARCH_COMMAND: '.$imap->LastIMAPCommand."\n".'FAILED: '.$imap->LastError);
+       }
+      else
+       {%m=map {$_=>$imap->parse_headers($_,'Subject','Date','Message-ID')} @_;
+       }
+     }
+    @_=();
+    foreach(keys(%m))
+     {if(!defined($m{$_})){push(@_,$_);}
+      else
+       {$p=${$m{$_}}{'Subject'}[0];
+        if($p =~ /^=[?]UTF-8[?]B[?]([0-9A-Za-z\/+]{1,}[=]{0,2})[?]=$/)
+         {$p=decode_base64($1);
+         }
+        ${$m{$_}}{'Message-ID'}[0] =~ s/^<|>$//g;
+        $m{$_}=[$p,rfc822_rfc8601(${$m{$_}}{'Date'}[0]),${$m{$_}}{'Message-ID'}[0]];
+       }
+     }
+    if(0!=scalar(@_)){die('INVALID_MAIL_IMAP_UIDs: '.join(' ',@_));}
+    else
+     {if($ARGV[0] =~ /^(clear|set)[0-9]{0,1}$/)
+       {foreach(sort({${$m{$a}}[0] cmp ${$m{$b}}[0] || $a <=> $b} keys(%m)))
+         {print($_.('1' eq substr($ARGV[0],-1,1)?'':"\t".${$m{$_}}[0]."\t".${$m{$_}}[1]."\t".${$m{$_}}[2]));
+          if((exists($c{$_})&&($_ =~ /^[0-9]{1,}$/)&&($p=$_))||(exists($c{${$m{$_}}[0]})&&($p=${$m{$_}}[0])))
+           {push(@_,$_);
+            delete($c{$p});
+            print("\t".$t);
+           }
+          print("\n");
+         }
+        if(1<=scalar(@_)){if(!$imap->store(join(',',@_),$t.'FLAGS '.$client)){die();}}
+        if(0<scalar(keys(%c)))
+         {print('LISTED_BUT_NOT_MATCHED:'."\n\t".join("\n\t",sort(keys(%c)))."\n");
+         }
+       }
+      elsif ('get' eq $ARGV[0] || 'check' eq $ARGV[0])
+       {if(1>scalar(keys(%m))){die('NOTHING_MATCHED');}
+        else
+         {my $fm;
+          if(!defined($ARGV[6])){$fm=Cwd::abs_path('./');}
+          else
+           {if(! -e $ARGV[6]){die('NOT_FOUND: '.$ARGV[6]);}
+            else{$fm=Cwd::abs_path($ARGV[6]);}
+           }
+          if(! -d $fm){die('NOT_A_DIRECTORY: '.$fm);}
+          else
+           {my ($fn,$fs,$fh,$ft)=();
+            my ($n,$i,$s)=(0,0,0);
+            my ($f0,$f1);
+            my ($f0s,$f1s);
+            my @w;
+            my @e;
+            my $d=Digest::SHA->new(512);
+            foreach(sort({${$m{$a}}[0] cmp ${$m{$b}}[0] || $a <=> $b} keys(%m)))
+             {if(${$m{$_}}[0] !~ /^(${ARGV[7]})[.]([0-9]{1,})$/){die('MAIL_SUBJECT_NOT_MATCHED:'."\t".$ARGV[7]."\t".${$m{$_}}[0]);}
+              else
+               {if(!defined($fn))
+                 {$fn=$1;
+                  $fm=Cwd::abs_path($fm.'/'.$1);
+                 }
+                else
+                 {if($1 ne $fn){die('FILENAME "'.$1.'" NOT confronted with former "'.$fn.'"');}
+                 }
+                $i=$2;
+                if(0==scalar(@w))
+                 {@w=split(/^/m,$imap->bodypart_string($_,1));
+                  if("\r\n" eq $w[$#w]){delete($w[$#w]);}
+                  $t=$w[$#w];
+                  delete($w[$#w]);
+                  if($w[$#w] !~ /^${ARGV[7]} ([0-9]{1,}) ([0-9a-f]{128}) (([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})[.](([0-9]{9})(([+-])([0-9]{2})([0-9]{2}))))\r$/){die('MALFORMED_FILE: '.$w[$#w]);}
+                  else
+                   {($fs,$fh)=($1,$2);
+                    $ft=DateTime->new(year=>$4,month=>$5,day=>$6,hour=>$7,minute=>$8,second=>$9,nanosecond=>$11,time_zone=>$12);
+                    $ft=$ft->epoch.'.'.$ft->nanosecond();
+                    if(POSIX::strftime('%Y-%m-%dT%H:%M:%S.'.$10,gmtime($ft+(($13.'60')*(((60*$14)+$15))))) ne $3){die();}
+                    else
+                     {if(0==$fs)
+                       {truncate($fm,0);
+                        success($f0s,$f0,$f1s,$f1,$fm,$fs,$fh,$imap,\%m,$client);
+                        exit(0);
+                       }
+                      else
+                       {if((-e $fm) && (-s $fm)>=1)
+                         {sysopen($f0,$fm,O_RDONLY);
+                          if(!defined($f0)){die();}
+                          else
+                           {binmode($f0);
+                            if(!defined(mmap($f0s,0,PROT_READ,MAP_SHARED,$f0,0))){die();}
+                            else
+                             {if(verify_size_hash(\$f0s,$fh,$fs)==$fs)
+                               {success($f0s,$f0,$f1s,$f1,$fm,$fs,$fh,$imap,\%m,$client);
+                                exit(0);
+                               }
+                             }
+                           }
+                         }
+                        if((('get' eq $ARGV[0])&&(1==$i))||((-e $fm.'.tmp')&&(1<=(-s $fm.'.tmp'))))
+                         {sysopen($f1,$fm.'.tmp',(('get' eq $ARGV[0])?(O_RDWR|O_CREAT):(O_RDONLY)));
+                          if(!defined($f1)){die();}
+                          else
+                           {binmode($f1);
+                            if((-s $f1)==$fs)
+                             {if(!defined(mmap($f1s,0,PROT_READ,MAP_SHARED,$f1,0))){die();}
+                              else
+                               {if(verify_size_hash(\$f1s,$fh,$fs)==$fs)
+                                 {rename_success($f0s,$f0,$f1s,$f1,$fm,$fs,$fh,$imap,\%m,$client,$ft);
+                                  exit(0);
+                                 }
+                               }
+                             }
+                           }
+                         }
+                       }
+                     }
+                   }
+                 }
+                else
+                 {@_=split(/^/m,$imap->bodypart_string($_,1));
+                  if("\r\n" eq $_[$#_]){delete($_[$#_]);}
+                  $t=$_[$#_];
+                  delete($_[$#_]);
+                  if(join('',@w) ne join('',@_)){die('MAIL_BODY_NOT_UNIFORM');}
+                 }
+                if($t !~ /^${$m{$_}}[0] ([0-9]{1,}) ([0-9a-f]{128}) ([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{9}[+-][0-9]{4})\r$/){die('MALFORMED_PIECE: '.$t);}
+                else
+                 {my ($l,$h)=($1,$2);
+                  if(1>$l || $l>$fs){die();}
+                  else
+                   {if(0==scalar(@e))
+                     {@e=@{size_array($fs,$l,$i)};
+                      if(0==scalar(@e)){die();}
+                      $p=\@e;
+                     }
+                    else
+                     {$p=size_array($fs,$l,$i);
+                     }
+                    if($l!=${${$p}[$i-1]}[0])
+                     {die('SIZE_NOT_MATCH:'.$i.'='.$l.'<>'.${${$p}[$i-1]}[0].'=EXPECTED');
+                     }
+                    else
+                     {${$m{$_}}[3]=scalar(@{$p});
+                      ${$m{$_}}[4]=$l;
+                      ${$m{$_}}[5]=(defined($e[$i-1])?${$e[$i-1]}[0]:0);
+                      $t=scalar(@e);
+                      if(scalar(@{$p})!=$t)
+                       {$fh='';
+                       }
+                      else
+                       {for(--$t;$t>=0;$t--)
+                         {if(${${$p}[$t]}[0]!=${$e[$t]}[0])
+                           {$l=0;
+                            ${$m{$_}}[3]=0;
+                           }
+                         }
+                        if(1<=$l)
+                         {if(scalar(keys(%m))>scalar(@e))
+                           {$fh='';
+                           }
+                          else
+                           {${$e[$i-1]}[1]=$_;
+                            $t=(2*${$e[0]}[0]+$i-2)*($i-1)/2;
+                            if($i==1+$n)
+                             {if(('get' eq $ARGV[0])||(defined($f1)&&((-s $f1)>=($s+$l))))
+                               {$p=$s;
+                               }
+                              else
+                               {if(defined($f1)){close($f1);}
+                                undef($f1);
+                                $p=0;
+                               }
+                             }
+                            else
+                             {if(defined($f1)&&((-s $f1)>=($t+$l))){$p=$t;}
+                              else
+                               {if(defined($f1)){close($f1);}
+                                if(('get' eq $ARGV[0])||((-e $fm.'.'.$i)&&((-s $fm.'.'.$i)==$l)))
+                                 {sysopen($f1,$fm.'.'.$i,(('get' eq $ARGV[0])?(O_RDWR|O_CREAT):(O_RDONLY)));
+                                  if(!defined($f1)){die();}
+                                  else
+                                   {binmode($f1);
+                                   }
+                                 }
+                                else
+                                 {undef($f1);
+                                 }
+                                $p=0;
+                               }
+                             }
+                            if(defined($f1)&&((-s $f1)<($p+$l)))
+                             {truncate($f1,($p+$l));
+                              if((-s $f1)!=($p+$l)){die();}
+                             }
+                            if(!defined(mmap($f1s,$l,PROT_READ|(('get' eq $ARGV[0])?PROT_WRITE:0),MAP_SHARED|(defined($f1)?0:MAP_ANONYMOUS),(defined($f1)?$f1:*STDIN),$p))){die();}
+                            else
+                             {if(length($f1s)!=$l){die();}
+                              else
+                               {if(verify_hash(\$f1s,$h,$l)==$l)
+                                 {if('get' ne $ARGV[0]){advance(\$f1s,$l,\$s);}
+                                  else
+                                   {hash_advance(\$f1s,$l,\$s,$d,\$f1s);
+                                   }
+                                  ${$e[$i-1]}[2]=Cwd::abs_path('/proc/'.$$.'/fd/'.fileno($f1));
+                                 }
+                                if(defined($f1s) && defined($f0) && length($f0s)>=($t+$l))
+                                 {$p=\substr($f0s,$t,$l);
+                                  if(verify_size_hash($p,$h,$l)==$l)
+                                   {if('get' ne $ARGV[0]){advance(\$f1s,$l,\$s);}
+                                    else
+                                     {fill_advance(\$f1s,$l,\$s,$d,$p);
+                                     }
+                                    ${$e[$i-1]}[2]=Cwd::abs_path('/proc/'.$$.'/fd/'.fileno($f0));
+                                   }
+                                 }
+                                if(defined($f1s) && (($i==1+$n)||(!defined($f1))||((-s $f1)!=$l)) && (-e $fm.'.'.$i))
+                                 {my $f2;
+                                  sysopen($f2,$fm.'.'.$i,O_RDONLY);
+                                  if(!defined($f2)){die();}
+                                  else
+                                   {if((-s $f2)!=$l)
+                                     {rename($fm.'.'.$i,$fm.'.'.$i.'.bad_size');
+                                     }
+                                    else
+                                     {if(!defined(mmap($p,0,PROT_READ,MAP_SHARED,$f2,0))){die();}
+                                      else
+                                       {if(length($p)!=$l){die();}
+                                        else
+                                         {if(verify_hash(\$p,$h,$l)!=$l)
+                                           {rename($fm.'.'.$i,$fm.'.'.$i.'.bad_hash');
+                                           }
+                                          else
+                                           {if('get' ne $ARGV[0]){advance(\$f1s,$l,\$s);}
+                                            else
+                                             {fill_advance(\$f1s,$l,\$s,$d,\$p);
+                                              rename($fm.'.'.$i,$fm.'.'.$i.'.deleted');
+                                             }
+                                            ${$e[$i-1]}[2]=Cwd::abs_path('/proc/'.$$.'/fd/'.fileno($f2));
+                                           }
+                                         }
+                                        if(1!=munmap($p)){die();};
+                                       }
+                                     }
+                                    close($f2);
+                                   }
+                                 }
+                                if(defined($f1s))
+                                 {if('get' ne $ARGV[0]){advance(\$f1s,$l,\$s);}
+                                  else
+                                   {$p=\decode_base64($imap->bodypart_string($_,2));
+                                    if(verify_size_hash($p,$h,$l)!=$l){die();}
+                                     {fill_advance(\$f1s,$l,\$s,$d,$p);
+                                     }
+                                   }
+                                 }
+                               }
+                             }
+                           }
+                         }
+                       }
+                     }
+                   }
+                 }
+                $n++;
+               }
+             }
+            if('' eq $fh)
+             {foreach(sort({${$m{$a}}[0] cmp ${$m{$b}}[0] || $a <=> $b} keys(%m)))
+               {print($_."\t".${$m{$_}}[1]."\t".${$m{$_}}[0]."\t".${$m{$_}}[2]."\t".${$m{$_}}[3]."\t".${$m{$_}}[4]."\t".${$m{$_}}[5]."\n");
+               }
+              if(scalar(keys(%m))>scalar(@e)){die('EXCESSIVE_MAILS');}
+              else{die('SIZE_ARRAY_NOT_UNIFORM');}
+             }
+            else
+             {if(scalar(@e)!=$n)
+               {checked(\@e,\%m);
+                die('INCOMPLETE_MAILS='.$n.'<'.scalar(@e).'=EXPECTED');
+               }
+              else
+               {if($s!=$fs)
+                 {checked(\@e,\%m);
+                  die('MAILS_SIZE='.$s.'<>'.$fs.'=EXPACTED_SIZE');
+                 }
+                else
+                 {if('get' ne $ARGV[0])
+                   {checked(\@e,\%m);
+                    print('PASSED!'."\n");
+                   }
+                  else
+                   {$f1->flush();
+                    if((-s $f1)!=$fs){die('FILE_SIZE='.(-s $f1).'<>'.$fs.'=EXPACTED_SIZE');}
+                    else
+                     {if($d->hexdigest ne $fh){die('=FILE_SHA512'.$d->hexdigest.'<>'.$fh.'EXPACTED_SHA512=');}
+                      else
+                       {rename_success($f0s,$f0,$f1s,$f1,$fm,$fs,$fh,$imap,\%m,$client,$ft);
+                       }
+                     }
+                   }
+                 }
+               }
+             }
+           }
+         }
+       }
+      else{die('UNKNOWN_COMMAND: '.$ARGV[0]);}
+     }
+   }
+  $imap->logout;
+ }
+
